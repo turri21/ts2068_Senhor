@@ -377,7 +377,7 @@ always @(posedge clk_sys) begin
     reg ioctl_downlD;
     ioctl_downlD <= ioctl_download;
     if (ioctl_downlD & ~ioctl_download) rom_loaded <= 1;
-    reset <= RESET | ~rom_loaded | status[0] | buttons[1];;
+    reset <= ~(RESET |rom_loaded | status[0] | buttons[1]);
 end
 
 //hps_io #(.CONF_STR(CONF_STR)) hps_io
@@ -456,102 +456,89 @@ wire [7:0] video;
 
 //--- memory --------------------------------------------------------------------------------------
 
+wire[13:0] va;
+wire[ 7:0] vd;
 
+wire[15:0] memA;
+wire[ 7:0] memD;
+wire[ 7:0] memQ;
+wire       memB;
+wire[ 7:0] memM;
+wire       memW;
 
+wire       mapped;
+wire       ramcs;
+wire[ 3:0] page;
 
-/////////////////  Memory  ////////////////////////
-/*
--    64 Kb HOME RAM: $00000 - $FFFF
--      * Video RAM on HOME RAM at $4000
--    ROM at $10000
-       * TS2068 ROM at 10000   15FFF    24Kb
-            - 10000 - 13FFF . Main ROM  16Kb
-            - 14000 - 15FFF . Ext ROM    8Kb
--      * ESXDOS ROM at 16000 - 17FFF     8Kb           128Kb
-------------------------------------------------------------
--    DIVMMC RAM: $20000 - $3FFFF        128Kb          128Kb
-------------------------------------------------------------
--    DOCK at $40000
-*/
+// Home ROM with $readmemh
+reg [7:0] home_rom [0:16383]; // 16KB ROM (14-bit address)
+wire [7:0] homeQ;
 
-wire download_rom = ioctl_index == 'd0 && ioctl_download == 1'b1;
-wire download_dock = ioctl_index == 'd1 && ioctl_download == 1'b1;
-
-// Keep track of the amount of blocks in the current cartridge
-reg [2:0] dock_blocks = 'd0;
-reg dock_loaded = 1'b0;
-always @(posedge clk_sys) begin
-    reg download_dock_last;
-    download_dock_last <= download_dock;
-    if (download_dock) dock_blocks <= ioctl_addr[15:13];
-    if (download_dock_last & ~download_dock) dock_loaded <= 1'b1;
-    else if (status[1] == 1'b1) dock_loaded <= 1'b0;
+initial begin
+    $readmemh("rtl/rom/tc2068-0.hex", home_rom);
 end
-//assign LED[1] = dock_loaded;
 
-wire [13:0] va;
-wire [22:0] vram_addr = {7'd0, 2'b01, va};
-wire [15:0] vram_dout;
-wire [7:0] vd = va[0] ? vram_dout[15:8] : vram_dout[7:0];
+always @(posedge clock) begin
+    homeQ <= home_rom[romE ? dioA[13:0] : memA[13:0]];
+end
 
-wire [15:0] memA /* synthesis keep */;
-wire [7:0] memD /* synthesis keep */;
-wire [7:0] memQ /* synthesis keep */;
-wire memB /* synthesis keep */;
-wire [7:0] memM;
-wire memR /* synthesis keep */;
-wire memW /* synthesis keep */;
+// Extended ROM with $readmemh
+reg [7:0] extd_rom [0:8191]; // 8KB ROM (13-bit address)
+wire [7:0] extdQ;
 
-wire mapped;
-wire ramcs /* synthesis keep */;
-wire [3:0] page;
+initial begin
+    $readmemh("rtl/rom/tc2068-1.hex", extd_rom);
+end
 
-wire [22:0] sdram_addr /* synthesis keep */ =
-    download_rom == 1'b1 ? {5'd0, 2'b01, ioctl_addr[15:0]} :                            // ROM write on  10000
-    download_dock == 1'b1 ? {4'd0, 3'b100, ioctl_addr[15:0]} :                          // DOCK write on 40000
-    memA[15:14] == 2'b00 && mapped && ramcs ? {4'd0, 1'b1, page, memA[12:0]} :          // DIVMMC RAM access (20000)
-    memA[15:14] == 2'b00 && mapped && ~ramcs ? {5'd0, 5'b01_011, memA[12:0]} :          // ESXDOS access (at 16000)
-    memM[memA[15:13]] & memB ? {5'd0, 5'b01_010, memA[12:0]} :                          // EXTROM (14000) Only 8KB
-    memM[memA[15:13]] & ~memB ? {4'd0, 3'b100, memA[15:0]}:                             // DOCK (40000)
-    memA[15:14] == 2'b00 ? {5'd0, 4'b0100, memA[13:0]}:                                 // ROM access (10000)
-    {5'd0, 2'b00, memA[15:0]};                                                          // HOME RAM
+always @(posedge clock) begin
+    extdQ <= extd_rom[memA[12:0]];
+end
 
-wire [7:0] sdram_din /* synthesis keep */ = ioctl_download == 1'b1 ? ioctl_dout : memD;
+// Dock RAM - converted to block RAM
+reg [7:0] dock_ram [0:65535]; // 64KB RAM
+wire [7:0] dockQ;
 
-assign memQ = (memA[15:13] > dock_blocks || ~dock_loaded) && memM[memA[15:13]] && ~memB ? 8'hFF : sdram_dout;
+always @(posedge clock) begin
+    if (dioW && dckE) begin
+        dock_ram[dioA[15:0]] <= dioD;
+    end
+    dockQ <= dock_ram[dckE ? dioA[15:0] : memA[15:0]];
+end
 
-wire [7:0] sdram_dout /* synthesis keep */;
-wire sdram_rd /* synthesis keep */ = ioctl_download == 1'b1 ? 1'b0 : memR;
-wire sdram_we /* synthesis keep */ = ioctl_download == 1'b1 ? ioctl_wr : memW;
+// ESXDOS ROM with $readmemh
+reg [7:0] drom_rom [0:8191]; // 8KB ROM (13-bit address)
+wire [7:0] dromQ;
 
-assign SDRAM_CLK = clk_sys;
-sdram sdram(
-    .SDRAM_DQ(SDRAM_DQ),
-    .SDRAM_A(SDRAM_A),
-    .SDRAM_DQML(SDRAM_DQML),
-    .SDRAM_DQMH(SDRAM_DQMH),
-    .SDRAM_BA(SDRAM_BA),
-    .SDRAM_nCS(SDRAM_nCS),
-    .SDRAM_nWE(SDRAM_nWE),
-    .SDRAM_nRAS(SDRAM_nRAS),
-    .SDRAM_nCAS(SDRAM_nCAS),
-    .SDRAM_CKE(SDRAM_CKE),
-    
-    .init(~power),
-    .clk(clk_sys),
-    .clkref(ne7M0),
-    
-    .bank(2'b00),
-    .addr(sdram_addr),
-    .oe(sdram_rd),
-    .dout(sdram_dout),
-    .din(sdram_din),
-    .we(sdram_we),
-    
-    .vram_addr(vram_addr),
-    .vram_dout(vram_dout)
-);
+initial begin
+    $readmemh("rtl/rom/esxdos.hex", drom_rom);
+end
 
+always @(posedge clock) begin
+    dromQ <= drom_rom[memA[12:0]];
+end
+
+// DRAM - converted to block RAM
+reg [7:0] dram_ram [0:131071]; // 128KB RAM (17-bit address)
+wire [7:0] dramQ;
+
+always @(posedge clock) begin
+    if (memW && memA[15:13] == 1 && mapped) begin
+        dram_ram[{page, memA[12:0]}] <= memD;
+    end
+    dramQ <= dram_ram[{page, memA[12:0]}];
+end
+
+reg[7:0] dckS = 0;
+always @(posedge clock) if(dckE) dckS <= dioA[15:13];
+
+wire[7:0] memB0 = memA[15:13] <= dckS ? dockQ : 8'hFF;
+wire[7:0] memB1 = memA[15:13] <= 0 ? extdQ : 8'hFF;
+
+assign memQ 
+    = memA[15:14] == 0 && mapped ? (ramcs ? dramQ : dromQ)
+    : memM[memA[15:13]] ? (memB ? memB1 : memB0)
+    : homeQ;
+	 
 //--- mist ----------------------------------------------------------------------------------------
 
 //	wire[7:0] joy1;
@@ -608,7 +595,7 @@ sdram sdram(
 	wire divmmc = status[6];
 
 //wire reset = RESET | status[0] | buttons[1];
-//wire reset = RESET && power && !romE && !dckE && !status[0];
+//wire reset = ~(RESET | power | !romE | !dckE | !status[0]);
 
 //	wire reset = power && F9 && !romE && !dckE && !status[1];
 
@@ -660,12 +647,12 @@ sdram sdram(
 
 //-------------------------------------------------------------------------------------------------
 
-//assign SDRAM_CLK = 1'b0;
-//assign SDRAM_CKE = 1'b0;
-//assign SDRAM_nCS = 1'b1;
-//assign SDRAM_nWE = 1'b1;
-//assign SDRAM_nRAS = 1'b1;
-//assign SDRAM_nCAS = 1'b1;
+assign SDRAM_CLK = 1'b0;
+assign SDRAM_CKE = 1'b0;
+assign SDRAM_nCS = 1'b1;
+assign SDRAM_nWE = 1'b1;
+assign SDRAM_nRAS = 1'b1;
+assign SDRAM_nCAS = 1'b1;
 
 assign led = { sdcCs, ~ear, 1'b1};
 
@@ -679,9 +666,9 @@ assign VGA_VS = VSync;
 //assign VGA_R  = (!col || col == 1) ? video : 8'd0;
 //assign VGA_B  = (!col || col == 3) ? video : 8'd0;
 // VGA = White if "video" is 1, else black
-assign VGA_R = video ? 8'hFF : 8'h00;
-assign VGA_G = video ? 8'hFF : 8'h00; 
-assign VGA_B = video ? 8'hFF : 8'h00;
+assign VGA_R = video ? 6'h3F : 6'h00; 
+assign VGA_G = video ? 6'h3F : 6'h00; 
+assign VGA_B = video ? 6'h3F : 6'h00; 
 
 
 

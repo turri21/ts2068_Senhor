@@ -77,4 +77,7 @@ source sys/sys.tcl
 source sys/sys_analog.tcl
 source files.qip
 
+set_global_assignment -name HEX_FILE "../ts2068-main - Copy/rom/esxdos.hex"
+set_global_assignment -name HEX_FILE "../ts2068-main - Copy/rom/tc2068-0.hex"
+set_global_assignment -name HEX_FILE "../ts2068-main - Copy/rom/tc2068-1.hex"
 set_instance_assignment -name PARTITION_HIERARCHY root_partition -to | -section_id Top
